@@ -20,6 +20,30 @@ import {
 } from "@carbon/react";
 import { Certificate, DocumentSigned } from "@carbon/icons-react";
 
+const isCertSuperseded = (cert, knownCerts) => {
+    if (cert.superseded === true) {
+        return true;
+    }
+    return knownCerts.some((other) => other.supercedes === cert.id);
+};
+
+const postCertAction = async (certId, action) => {
+    const response = await fetch(`/api/v1alpha1/certs/${certId}/${action}`, {
+        method: "POST",
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        const error = new Error(text || `HTTP error! status: ${response.status}`);
+        error.status = response.status;
+        throw error;
+    }
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+        return response.json();
+    }
+    return null;
+};
+
 const TLS = () => {
     const [certificates, setCertificates] = useState([]);
     const [childCerts, setChildCerts] = useState({});
@@ -27,6 +51,8 @@ const TLS = () => {
     const [expandedRows, setExpandedRows] = useState({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [actionBusy, setActionBusy] = useState(false);
+    const [actionNotice, setActionNotice] = useState(null);
 
     useEffect(() => {
         fetchCertificates();
@@ -113,14 +139,57 @@ const TLS = () => {
         );
     };
 
-    const handleRevokeAndRotate = (cert) => {
-        // TODO: Implement revoke and rotate functionality
-        console.log("Revoke and Rotate:", cert);
+    const knownCerts = [...certificates, ...Object.values(childCerts).flat()];
+
+    const handleRotate = async (cert) => {
+        if (isCertSuperseded(cert, knownCerts)) {
+            return;
+        }
+        try {
+            setActionBusy(true);
+            setActionNotice(null);
+            await postCertAction(cert.id, "rotate");
+            setActionNotice({
+                kind: "success",
+                title: "Certificate rotation requested",
+                subtitle: cert.label || cert.id,
+            });
+        } catch (err) {
+            setActionNotice({
+                kind: "error",
+                title:
+                    err.status === 409 ? "Cannot rotate certificate" : "Error rotating certificate",
+                subtitle: err.message,
+            });
+        } finally {
+            setActionBusy(false);
+        }
     };
 
-    const handleRevoke = (cert) => {
-        // TODO: Implement revoke functionality
-        console.log("Revoke:", cert);
+    const handleRevoke = (_cert) => {
+        // Revocation is not implemented yet.
+    };
+
+    const renderCertActions = (cert) => {
+        const superseded = isCertSuperseded(cert, knownCerts);
+        if (superseded) {
+            return null;
+        }
+        return (
+            <OverflowMenu size="sm" flipped>
+                <OverflowMenuItem
+                    itemText="Rotate"
+                    disabled={actionBusy}
+                    onClick={() => handleRotate(cert)}
+                />
+                <OverflowMenuItem
+                    itemText="Revoke"
+                    isDelete
+                    disabled
+                    onClick={() => handleRevoke(cert)}
+                />
+            </OverflowMenu>
+        );
     };
 
     const headers = [
@@ -171,20 +240,8 @@ const TLS = () => {
                             </Tag>
                         </TableCell>
                         <TableCell>{formatDate(cert.renewaltime)}</TableCell>
-                        <TableCell>{cert.generation}</TableCell>
-                        <TableCell>
-                            <OverflowMenu size="sm" flipped>
-                                <OverflowMenuItem
-                                    itemText="Revoke and Rotate"
-                                    onClick={() => handleRevokeAndRotate(cert)}
-                                />
-                                <OverflowMenuItem
-                                    itemText="Revoke"
-                                    isDelete
-                                    onClick={() => handleRevoke(cert)}
-                                />
-                            </OverflowMenu>
-                        </TableCell>
+                        <TableCell>{cert.rotationordinal ?? 0}</TableCell>
+                        <TableCell>{renderCertActions(cert)}</TableCell>
                     </TableExpandRow>
                     {isExpanded && isLoadingChildren && (
                         <TableExpandedRow colSpan={headers.length + 1}>
@@ -226,20 +283,8 @@ const TLS = () => {
                         </Tag>
                     </TableCell>
                     <TableCell>{formatDate(cert.renewaltime)}</TableCell>
-                    <TableCell>{cert.generation}</TableCell>
-                    <TableCell>
-                        <OverflowMenu size="sm" flipped>
-                            <OverflowMenuItem
-                                itemText="Revoke and Rotate"
-                                onClick={() => handleRevokeAndRotate(cert)}
-                            />
-                            <OverflowMenuItem
-                                itemText="Revoke"
-                                isDelete
-                                onClick={() => handleRevoke(cert)}
-                            />
-                        </OverflowMenu>
-                    </TableCell>
+                    <TableCell>{cert.rotationordinal ?? 0}</TableCell>
+                    <TableCell>{renderCertActions(cert)}</TableCell>
                 </TableRow>
             );
         }
@@ -270,6 +315,16 @@ const TLS = () => {
                     title="Error loading certificates"
                     subtitle={error}
                     onCloseButtonClick={() => setError(null)}
+                    style={{ marginBottom: "1rem" }}
+                />
+            )}
+
+            {actionNotice && (
+                <InlineNotification
+                    kind={actionNotice.kind}
+                    title={actionNotice.title}
+                    subtitle={actionNotice.subtitle}
+                    onCloseButtonClick={() => setActionNotice(null)}
                     style={{ marginBottom: "1rem" }}
                 />
             )}
