@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
     Breadcrumb,
     BreadcrumbItem,
@@ -19,12 +19,45 @@ import {
     OverflowMenuItem,
 } from "@carbon/react";
 import { Certificate, DocumentSigned } from "@carbon/icons-react";
+import { CancelWatch, CreateWatch } from "../../tools/watch";
+
+const certsUrl = ({ signedBy } = {}) => {
+    if (signedBy) {
+        return `/api/v1alpha1/certs?signedby=${signedBy}`;
+    }
+    return "/api/v1alpha1/certs";
+};
+
+const collectKnownCerts = (rootCerts, childrenByIssuer) => {
+    const byId = new Map();
+    for (const cert of rootCerts) {
+        byId.set(cert.id, cert);
+    }
+    for (const children of Object.values(childrenByIssuer)) {
+        if (!Array.isArray(children)) {
+            continue;
+        }
+        for (const cert of children) {
+            byId.set(cert.id, cert);
+        }
+    }
+    return [...byId.values()];
+};
 
 const isCertSuperseded = (cert, knownCerts) => {
     if (cert.superseded === true) {
         return true;
     }
-    return knownCerts.some((other) => other.supercedes === cert.id);
+    if (knownCerts.some((other) => other.supercedes === cert.id)) {
+        return true;
+    }
+    if (!cert.objectname) {
+        return false;
+    }
+    const ordinal = cert.rotationordinal ?? 0;
+    return knownCerts.some(
+        (other) => other.objectname === cert.objectname && (other.rotationordinal ?? 0) > ordinal
+    );
 };
 
 const postCertAction = async (certId, action) => {
@@ -51,54 +84,84 @@ const TLS = () => {
     const [expandedRows, setExpandedRows] = useState({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [actionBusy, setActionBusy] = useState(false);
     const [actionNotice, setActionNotice] = useState(null);
+    const [actionBusy, setActionBusy] = useState(false);
+
+    const expandedIssuerIds = useMemo(
+        () =>
+            Object.entries(expandedRows)
+                .filter(([, isExpanded]) => isExpanded)
+                .map(([id]) => id)
+                .sort((a, b) => a.localeCompare(b))
+                .join(","),
+        [expandedRows]
+    );
 
     useEffect(() => {
-        fetchCertificates();
+        setExpandedRows({});
+        setChildCerts({});
+        setLoadingChildren({});
+        setLoading(true);
+        setError(null);
+
+        const watchContext = CreateWatch(certsUrl(), function (message) {
+            const body = message.body;
+            if (body.method === "GET" || body.method === "UPDATE") {
+                if (body.statusCode >= 200 && body.statusCode < 300) {
+                    setCertificates(body.content);
+                    setError(null);
+                    setLoading(false);
+                } else {
+                    setError(body.content);
+                    setLoading(false);
+                }
+            }
+        });
+
+        return () => {
+            CancelWatch(watchContext);
+        };
     }, []);
 
-    const fetchCertificates = async () => {
-        try {
-            setLoading(true);
-            setError(null);
-            const response = await fetch("/api/v1alpha1/certs");
+    useEffect(() => {
+        if (!expandedIssuerIds) {
+            return undefined;
+        }
 
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+        const issuerIds = expandedIssuerIds.split(",");
+        setLoadingChildren((prev) => {
+            const next = { ...prev };
+            let changed = false;
+            for (const issuerId of issuerIds) {
+                if (next[issuerId] !== false) {
+                    next[issuerId] = true;
+                    changed = true;
+                }
             }
+            return changed ? next : prev;
+        });
 
-            const data = await response.json();
-            setCertificates(data);
-        } catch (err) {
-            setError(err.message);
-            console.error("Error fetching certificates:", err);
-        } finally {
-            setLoading(false);
-        }
-    };
+        const watches = issuerIds.map((issuerId) =>
+            CreateWatch(certsUrl({ signedBy: issuerId }), function (message) {
+                const body = message.body;
+                if (body.method === "GET" || body.method === "UPDATE") {
+                    if (body.statusCode >= 200 && body.statusCode < 300) {
+                        setChildCerts((prev) => ({ ...prev, [issuerId]: body.content }));
+                    }
+                    setLoadingChildren((prev) => ({ ...prev, [issuerId]: false }));
+                }
+            })
+        );
 
-    const fetchChildCertificates = async (issuerId) => {
-        if (childCerts[issuerId]) {
-            return; // Already fetched
-        }
+        return () => {
+            watches.forEach(CancelWatch);
+        };
+    }, [expandedIssuerIds]);
 
-        try {
-            setLoadingChildren((prev) => ({ ...prev, [issuerId]: true }));
-            const response = await fetch(`/api/v1alpha1/certs?signedby=${issuerId}`);
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const data = await response.json();
-            setChildCerts((prev) => ({ ...prev, [issuerId]: data }));
-        } catch (err) {
-            console.error("Error fetching child certificates:", err);
-        } finally {
-            setLoadingChildren((prev) => ({ ...prev, [issuerId]: false }));
-        }
-    };
+    const knownCerts = useMemo(
+        () => collectKnownCerts(certificates, childCerts),
+        [certificates, childCerts]
+    );
 
     const formatDate = (dateString) => {
         if (!dateString) return "N/A";
@@ -139,8 +202,6 @@ const TLS = () => {
         );
     };
 
-    const knownCerts = [...certificates, ...Object.values(childCerts).flat()];
-
     const handleRotate = async (cert) => {
         if (isCertSuperseded(cert, knownCerts)) {
             return;
@@ -172,14 +233,12 @@ const TLS = () => {
 
     const renderCertActions = (cert) => {
         const superseded = isCertSuperseded(cert, knownCerts);
-        if (superseded) {
-            return null;
-        }
         return (
-            <OverflowMenu size="sm" flipped>
+            <OverflowMenu size="sm" flipped disabled={superseded}>
                 <OverflowMenuItem
                     itemText="Rotate"
-                    disabled={actionBusy}
+                    disabled={actionBusy || superseded}
+                    title={superseded ? "Certificate has been superseded" : undefined}
                     onClick={() => handleRotate(cert)}
                 />
                 <OverflowMenuItem
@@ -192,12 +251,25 @@ const TLS = () => {
         );
     };
 
+    const renderGenerationCell = (cert, superseded) => (
+        <TableCell>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                {cert.rotationordinal ?? 0}
+                {superseded && (
+                    <Tag type="gray" size="sm">
+                        Superseded
+                    </Tag>
+                )}
+            </div>
+        </TableCell>
+    );
+
     const headers = [
         { key: "type", header: "Type" },
         { key: "label", header: "Label" },
         { key: "expiration", header: "Expiration" },
         { key: "renewaltime", header: "Renewal Time" },
-        { key: "generation", header: "Gen" },
+        { key: "rotationordinal", header: "Gen" },
         { key: "actions", header: "" },
     ];
 
@@ -206,16 +278,14 @@ const TLS = () => {
         const isExpanded = expandedRows[cert.id] || false;
         const children = childCerts[cert.id] || [];
         const isLoadingChildren = loadingChildren[cert.id] || false;
+        const superseded = isCertSuperseded(cert, knownCerts);
+        const rowClassName = superseded ? "tls-cert-row--superseded" : undefined;
 
         const handleExpand = () => {
             setExpandedRows((prev) => ({
                 ...prev,
                 [cert.id]: !prev[cert.id],
             }));
-
-            if (!childCerts[cert.id] && !isExpanded) {
-                fetchChildCertificates(cert.id);
-            }
         };
 
         const indentStyle = {
@@ -226,7 +296,11 @@ const TLS = () => {
             // CA certificates - use TableExpandRow
             return (
                 <React.Fragment key={cert.id}>
-                    <TableExpandRow isExpanded={isExpanded} onExpand={handleExpand}>
+                    <TableExpandRow
+                        isExpanded={isExpanded}
+                        onExpand={handleExpand}
+                        className={rowClassName}
+                    >
                         <TableCell>
                             <div style={{ display: "flex", alignItems: "center", ...indentStyle }}>
                                 {renderIcon(true)}
@@ -240,7 +314,7 @@ const TLS = () => {
                             </Tag>
                         </TableCell>
                         <TableCell>{formatDate(cert.renewaltime)}</TableCell>
-                        <TableCell>{cert.rotationordinal ?? 0}</TableCell>
+                        {renderGenerationCell(cert, superseded)}
                         <TableCell>{renderCertActions(cert)}</TableCell>
                     </TableExpandRow>
                     {isExpanded && isLoadingChildren && (
@@ -268,7 +342,7 @@ const TLS = () => {
         } else {
             // Non-CA certificates - always need empty cell for expand column
             return (
-                <TableRow key={cert.id}>
+                <TableRow key={cert.id} className={rowClassName}>
                     <TableCell />
                     <TableCell>
                         <div style={{ display: "flex", alignItems: "center", ...indentStyle }}>
@@ -283,7 +357,7 @@ const TLS = () => {
                         </Tag>
                     </TableCell>
                     <TableCell>{formatDate(cert.renewaltime)}</TableCell>
-                    <TableCell>{cert.rotationordinal ?? 0}</TableCell>
+                    {renderGenerationCell(cert, superseded)}
                     <TableCell>{renderCertActions(cert)}</TableCell>
                 </TableRow>
             );

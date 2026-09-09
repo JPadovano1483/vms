@@ -396,6 +396,7 @@ const getCertsSignedBy = async function (req, res) {
                     "FROM tlsCertificates t WHERE signedBy IS NULL"
             );
         });
+        res._watch = [{ table: "TlsCertificates" }];
         res.status(returnStatus).json(result.rows);
     } catch (err) {
         returnStatus = 400;
