@@ -21,6 +21,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import { createMockClient, TEST_UUIDS } from "./test-helpers/mock-db.js";
 import { buildApiApp } from "./test-helpers/build-api-app.js";
+import { RotateCertificate } from "./certs.js";
 
 const mockClient = createMockClient();
 let mockFormFields = {};
@@ -42,6 +43,14 @@ vi.mock("formidable", () => {
 vi.mock("./watch-server.js", () => ({
     WatchNotify: vi.fn(),
 }));
+
+vi.mock("./certs.js", async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        RotateCertificate: vi.fn(),
+    };
+});
 
 vi.mock("./sync-management.js", async (importOriginal) => {
     const actual = await importOriginal();
@@ -111,6 +120,11 @@ describe("mc-apiserver routes", () => {
                             cost: 1,
                         },
                     ],
+                };
+            }
+            if (sql.includes("AS superseded")) {
+                return {
+                    rows: [{ id: TEST_UUIDS.cert, superseded: false }],
                 };
             }
             return { rows: [], rowCount: 0 };
@@ -229,5 +243,72 @@ describe("mc-apiserver routes", () => {
             .expect(201);
 
         expect(res.body).toEqual({ processed: 1 });
+    });
+
+    it("GET /certs returns certificates with a superseded flag", async () => {
+        const { app } = await buildApiApp({
+            includeAdmin: false,
+            includeUser: false,
+            includeMcRoutes: true,
+        });
+
+        const res = await request(app)
+            .get("/api/v1alpha1/certs")
+            .set("x-test-auth", "1")
+            .expect(200);
+
+        expect(res.body).toEqual([{ id: TEST_UUIDS.cert, superseded: false }]);
+        expect(mockClient.query).toHaveBeenCalledWith(expect.stringContaining("AS superseded"));
+    });
+
+    it("POST /certs/:cid/rotate returns 202", async () => {
+        RotateCertificate.mockResolvedValue({ id: TEST_UUIDS.cert });
+        const { app } = await buildApiApp({
+            includeAdmin: false,
+            includeUser: false,
+            includeMcRoutes: true,
+        });
+
+        const res = await request(app)
+            .post(`/api/v1alpha1/certs/${TEST_UUIDS.cert}/rotate`)
+            .set("x-test-auth", "1")
+            .expect(202);
+
+        expect(res.body).toEqual({ id: TEST_UUIDS.cert });
+        expect(RotateCertificate).toHaveBeenCalledWith(TEST_UUIDS.cert);
+    });
+
+    it("POST /certs/:cid/rotate rejects a malformed id", async () => {
+        const { app } = await buildApiApp({
+            includeAdmin: false,
+            includeUser: false,
+            includeMcRoutes: true,
+        });
+
+        const res = await request(app)
+            .post("/api/v1alpha1/certs/not-a-uuid/rotate")
+            .set("x-test-auth", "1")
+            .expect(400);
+
+        expect(res.text).toContain("Malformed certificate ID");
+        expect(RotateCertificate).not.toHaveBeenCalled();
+    });
+
+    it("POST /certs/:cid/rotate forwards certificate-manager errors", async () => {
+        RotateCertificate.mockRejectedValue(
+            Object.assign(new Error("Certificate has been superseded"), { statusCode: 409 })
+        );
+        const { app } = await buildApiApp({
+            includeAdmin: false,
+            includeUser: false,
+            includeMcRoutes: true,
+        });
+
+        const res = await request(app)
+            .post(`/api/v1alpha1/certs/${TEST_UUIDS.cert}/rotate`)
+            .set("x-test-auth", "1")
+            .expect(409);
+
+        expect(res.text).toBe("Certificate has been superseded");
     });
 });
