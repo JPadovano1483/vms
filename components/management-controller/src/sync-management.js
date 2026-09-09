@@ -723,19 +723,30 @@ export async function SiteCertificateChanged(certId) {
     const client = await ClientFromPool("system");
     try {
         await client.query("BEGIN");
-        const result = await client.query(
+        const interior = await client.query(
             "SELECT InteriorSites.Id, TlsCertificates.ObjectName FROM InteriorSites " +
                 "JOIN TlsCertificates ON TlsCertificates.Id = InteriorSites.Certificate " +
                 "WHERE Certificate = $1",
             [certId]
         );
-        if (result.rowCount == 1) {
-            const site = result.rows[0];
-            if (peers[site.id]) {
-                const secret = await LoadSecret(site.objectname);
-                const [hash] = await hashedTlsState(client, certId, secret);
-                await UpdateLocalState(site.id, `tls-site-${site.id}`, hash);
+        let site;
+        if (interior.rowCount == 1) {
+            site = interior.rows[0];
+        } else {
+            const member = await client.query(
+                "SELECT MemberSites.Id, TlsCertificates.ObjectName FROM MemberSites " +
+                    "JOIN TlsCertificates ON TlsCertificates.Id = MemberSites.Certificate " +
+                    "WHERE MemberSites.Certificate = $1",
+                [certId]
+            );
+            if (member.rowCount == 1) {
+                site = member.rows[0];
             }
+        }
+        if (site && peers[site.id]) {
+            const secret = await LoadSecret(site.objectname);
+            const [hash] = await hashedTlsState(client, certId, secret);
+            await UpdateLocalState(site.id, `tls-site-${site.id}`, hash);
         }
         await client.query("COMMIT");
     } catch (error) {

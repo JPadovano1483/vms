@@ -772,6 +772,7 @@ function enqueueSecretWork(objectName, work) {
             secretWorkTail.delete(objectName);
         }
     });
+    return next;
 }
 
 async function notifyTlsConsumers(certId) {
@@ -1041,6 +1042,18 @@ async function secretAdded(dblink, secret) {
         await client.query("COMMIT");
         await notify.commit();
 
+        // cert-manager writes the Secret before status.renewalTime exists; fill it from a follow-up GET.
+        if (!renewal) {
+            try {
+                const cert_object = await LoadCertificate(secret.metadata.name);
+                await persistCertificateTimes(cert_object, dblink);
+            } catch (err) {
+                Log(
+                    `Failed to persist certificate times for ${secret.metadata.name}: ${err.stack}`
+                );
+            }
+        }
+
         if (rotation) {
             if (is_ca && oldCaId) {
                 await enqueueBackboneCaChildRequests(dblink, oldCaId);
@@ -1199,11 +1212,10 @@ const onSecretWatch = function (action, secret) {
     }
     const objectName = secret.metadata.name;
     if (action == "ADDED") {
-        enqueueSecretWork(objectName, () => secretAdded(dblink, secret));
-        return;
+        return enqueueSecretWork(objectName, () => secretAdded(dblink, secret));
     }
     if (action == "MODIFIED" && secret.data) {
-        enqueueSecretWork(objectName, async () => {
+        return enqueueSecretWork(objectName, async () => {
             const created = await secretAdded(dblink, secret);
             if (!created) {
                 await secretRenewed(secret);
@@ -1212,52 +1224,57 @@ const onSecretWatch = function (action, secret) {
     }
 };
 
+async function persistCertificateTimes(cert, currentIdHint) {
+    const renewalTime = cert?.status?.renewalTime;
+    if (!renewalTime) {
+        return;
+    }
+    const renewal = new Date(renewalTime);
+    const expiration = cert.status?.notAfter ? new Date(cert.status.notAfter) : null;
+    const notify = new NotifyTransaction();
+    const client = await ClientFromPool("system");
+    try {
+        await client.query("BEGIN");
+        let currentId = currentIdHint || cert.metadata?.annotations?.["skupper.io/vms-dblink"];
+        if (currentId && (await isCertificateSuperseded(client, currentId))) {
+            const tip = await lockCurrentCertificateByObjectName(client, cert.metadata?.name);
+            currentId = tip?.id;
+        }
+        if (!currentId) {
+            const tip = await lockCurrentCertificateByObjectName(client, cert.metadata?.name);
+            currentId = tip?.id;
+        }
+        if (!currentId) {
+            await client.query("ROLLBACK");
+            return;
+        }
+        const dbcert = await client.query(
+            "UPDATE TlsCertificates SET RenewalTime = $1::timestamptz, Expiration = COALESCE(Expiration, $2::timestamptz) " +
+                "WHERE Id = $3 AND (RenewalTime IS DISTINCT FROM $1::timestamptz OR (Expiration IS NULL AND $2::timestamptz IS NOT NULL)) RETURNING Id",
+            [renewal, expiration, currentId]
+        );
+        for (const dbrow of dbcert.rows) {
+            notify.update("TlsCertificates", dbrow.id);
+        }
+        await client.query("COMMIT");
+        await notify.commit();
+    } catch (error) {
+        await client.query("ROLLBACK");
+        Log(`Exception in persistCertificateTimes: ${error.stack}`);
+    } finally {
+        client.release();
+    }
+}
+
 //
 // Handle watch events on Certificates
 //
 const onCertificateWatch = async function (action, cert) {
-    const dblink = cert.metadata.annotations?.["skupper.io/vms-dblink"];
     if (
-        action == "MODIFIED" &&
-        cert.metadata.annotations?.[META_ANNOTATION_VMS_CONTROLLED] == "true" &&
-        cert.status?.notAfter &&
-        cert.status.renewalTime
+        (action == "ADDED" || action == "MODIFIED") &&
+        cert.metadata.annotations?.[META_ANNOTATION_VMS_CONTROLLED] == "true"
     ) {
-        const notify = new NotifyTransaction();
-        const client = await ClientFromPool("system");
-        const expiration = new Date(cert.status.notAfter);
-        const renewal = new Date(cert.status.renewalTime);
-        try {
-            await client.query("BEGIN");
-            let currentId = dblink;
-            if (currentId && (await isCertificateSuperseded(client, currentId))) {
-                const tip = await lockCurrentCertificateByObjectName(client, cert.metadata.name);
-                currentId = tip?.id;
-            }
-            if (!currentId) {
-                const tip = await lockCurrentCertificateByObjectName(client, cert.metadata.name);
-                currentId = tip?.id;
-            }
-            if (!currentId) {
-                await client.query("ROLLBACK");
-                return;
-            }
-            const dbcert = await client.query(
-                "UPDATE TlsCertificates SET RenewalTime = $2, Expiration = COALESCE(Expiration, $1) " +
-                    "WHERE Id = $3 AND (Expiration IS NULL OR Expiration = $1) RETURNING Id",
-                [expiration, renewal, currentId]
-            );
-            for (const dbrow of dbcert.rows) {
-                notify.update("TlsCertificates", dbrow.id);
-            }
-            await client.query("COMMIT");
-            await notify.commit();
-        } catch (error) {
-            await client.query("ROLLBACK");
-            Log(`Exception in onCertificateWatch: ${error.stack}`);
-        } finally {
-            client.release();
-        }
+        await persistCertificateTimes(cert);
     }
 };
 
