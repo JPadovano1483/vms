@@ -22,6 +22,9 @@ import request from "supertest";
 import { createMockClient, TEST_UUIDS } from "./test-helpers/mock-db.js";
 import { buildApiApp } from "./test-helpers/build-api-app.js";
 import { RotateCertificate } from "./certs.js";
+import { LoadSecret } from "@vms/modules/kube";
+import { getTlsRotationMeta, overlayDualTrustCa } from "./tls-rotation.js";
+import { META_ANNOTATION_TLS_LAST_VALID, META_ANNOTATION_TLS_ORDINAL } from "@vms/modules/common";
 
 const mockClient = createMockClient();
 let mockFormFields = {};
@@ -67,9 +70,28 @@ vi.mock("./db.js", async (importOriginal) => {
     };
 });
 
+vi.mock("@vms/modules/kube", async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        LoadSecret: vi.fn(),
+    };
+});
+
+vi.mock("./tls-rotation.js", async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        overlayDualTrustCa: vi.fn(actual.overlayDualTrustCa),
+        getTlsRotationMeta: vi.fn(actual.getTlsRotationMeta),
+    };
+});
+
 describe("mc-apiserver routes", () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        overlayDualTrustCa.mockImplementation(async (_client, _id, data) => data);
+        getTlsRotationMeta.mockResolvedValue({ ordinal: 0, lastValid: 0 });
         mockClient.query.mockImplementation(async (sql) => {
             if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
                 return {};
@@ -125,6 +147,24 @@ describe("mc-apiserver routes", () => {
             if (sql.includes("AS superseded")) {
                 return {
                     rows: [{ id: TEST_UUIDS.cert, superseded: false }],
+                };
+            }
+            if (sql.includes("TlsCertificates.Id AS certificate FROM ApplicationNetworks")) {
+                return {
+                    rowCount: 1,
+                    rows: [
+                        {
+                            vanid: "van-network-id",
+                            objectname: "van-cred-secret",
+                            certificate: TEST_UUIDS.cert,
+                        },
+                    ],
+                };
+            }
+            if (sql.includes("SELECT hostname, port FROM BackboneAccessPoints")) {
+                return {
+                    rowCount: 1,
+                    rows: [{ hostname: "edge.example.com", port: 443 }],
                 };
             }
             return { rows: [], rowCount: 0 };
@@ -310,5 +350,48 @@ describe("mc-apiserver routes", () => {
             .expect(409);
 
         expect(res.text).toBe("Certificate has been superseded");
+    });
+
+    it("GET /vans/:vid/config/connecting/:apid overlays dual-trust CA and TLS rotation metadata", async () => {
+        LoadSecret.mockResolvedValue({
+            data: {
+                "ca.crt": "b2xkLWNh",
+                "tls.crt": "Y2VydA==",
+                "tls.key": "a2V5",
+            },
+            metadata: { name: "van-cred-secret" },
+        });
+        overlayDualTrustCa.mockResolvedValue({
+            "ca.crt": "ZHVhbC10cnVzdA==",
+            "tls.crt": "Y2VydA==",
+            "tls.key": "a2V5",
+        });
+        getTlsRotationMeta.mockResolvedValue({ ordinal: 3, lastValid: 1 });
+
+        const { app } = await buildApiApp({
+            includeAdmin: false,
+            includeUser: false,
+            includeMcRoutes: true,
+        });
+
+        const res = await request(app)
+            .get(`/api/v1alpha1/vans/${TEST_UUIDS.van}/config/connecting/${TEST_UUIDS.accessPoint}`)
+            .set("x-test-auth", "1")
+            .expect(200);
+
+        expect(LoadSecret).toHaveBeenCalledWith("van-cred-secret");
+        expect(overlayDualTrustCa).toHaveBeenCalledWith(
+            mockClient,
+            TEST_UUIDS.cert,
+            expect.objectContaining({ "ca.crt": "b2xkLWNh" })
+        );
+        expect(getTlsRotationMeta).toHaveBeenCalledWith(mockClient, TEST_UUIDS.cert);
+        expect(res.text).toContain("van-network-id");
+        expect(res.text).toContain("edge.example.com");
+        expect(res.text).toContain("ZHVhbC10cnVzdA==");
+        expect(res.text).toContain(META_ANNOTATION_TLS_ORDINAL);
+        expect(res.text).toContain(META_ANNOTATION_TLS_LAST_VALID);
+        expect(res.text).toContain("3");
+        expect(res.text).toContain("1");
     });
 });

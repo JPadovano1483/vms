@@ -286,7 +286,7 @@ const getVanConfigConnecting = async function (req, res) {
     try {
         const { result, apResult } = await queryWithContext(req, client, async (client) => {
             const result = await client.query(
-                "SELECT VanId, ObjectName FROM ApplicationNetworks " +
+                "SELECT VanId, ObjectName, TlsCertificates.Id AS certificate FROM ApplicationNetworks " +
                     "JOIN NetworkCredentials ON NetworkCredentials.MemberOf = ApplicationNetworks.Id " +
                     "JOIN TlsCertificates ON TlsCertificates.Id = NetworkCredentials.Certificate " +
                     "WHERE ApplicationNetworks.Id = $1",
@@ -305,10 +305,18 @@ const getVanConfigConnecting = async function (req, res) {
             const van = result.rows[0];
             const ap = apResult.rows[0];
             const secret = await LoadSecret(van.objectname);
+            const data = await overlayDualTrustCa(client, van.certificate, secret.data);
+            const tlsMeta = await getTlsRotationMeta(client, van.certificate);
             const output = [
                 resourceTemplates.NetworkCR(van.vanid),
                 resourceTemplates.NetworkLinkCR(ap.hostname, ap.port, van.objectname),
-                resourceTemplates.Secret(secret, van.objectname),
+                resourceTemplates.Secret(
+                    { ...secret, data },
+                    van.objectname,
+                    undefined,
+                    undefined,
+                    tlsMeta
+                ),
             ];
             if (exposeNetworkObserverConsole) {
                 const routingKey = `skupper-console-${van.vanid}`;

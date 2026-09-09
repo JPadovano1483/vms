@@ -775,21 +775,14 @@ function enqueueSecretWork(objectName, work) {
     return next;
 }
 
-async function notifyTlsConsumers(certId) {
-    await SiteCertificateChanged(certId);
-    await AccessCertificateChanged(certId);
-    await SyncColoTlsCertificate(certId);
+async function maybeTrimIssuerSiblings(certId) {
     const client = await ClientFromPool("system");
     try {
         const cert = await loadCertificateRow(client, certId);
-        if (!cert) {
+        if (!cert?.signedby) {
             return;
         }
-        const issuerId = cert.isca ? cert.id : cert.signedby;
-        if (!issuerId) {
-            return;
-        }
-        const issuer = await loadCertificateRow(client, issuerId);
+        const issuer = await loadCertificateRow(client, cert.signedby);
         const oldCaId = issuer?.supercedes;
         if (!oldCaId) {
             return;
@@ -797,7 +790,7 @@ async function notifyTlsConsumers(certId) {
         if (await hasLiveChildren(client, oldCaId)) {
             return;
         }
-        const siblings = await listCurrentLeafChildren(client, issuerId);
+        const siblings = await listCurrentLeafChildren(client, issuer.id);
         for (const sibling of siblings) {
             if (sibling.id === certId) {
                 continue;
@@ -811,7 +804,56 @@ async function notifyTlsConsumers(certId) {
     }
 }
 
-async function insertBackboneCaRotationRequest(oldCertId) {
+async function notifyTlsConsumers(certId) {
+    await SiteCertificateChanged(certId);
+    await AccessCertificateChanged(certId);
+    await SyncColoTlsCertificate(certId);
+    await maybeTrimIssuerSiblings(certId);
+}
+
+function durationHoursFromInterval(interval) {
+    return Math.trunc(IntervalMilliseconds(interval) / 3600000);
+}
+
+const VAN_CA_MIN_DURATION_HOURS = 1;
+
+function vanCaDurationHours(van) {
+    if (van.endtime) {
+        const durationMs =
+            new Date(van.endtime).getTime() - Date.now() + IntervalMilliseconds(van.deletedelay);
+        return Math.max(VAN_CA_MIN_DURATION_HOURS, Math.trunc(durationMs / 3600000));
+    }
+    return durationHoursFromInterval(DefaultCaExpiration());
+}
+
+async function insertRotationCertificateRequest(
+    client,
+    notify,
+    created,
+    { requestType, ownerColumn, ownerId, issuerId, supercedes, durationHours, hostname }
+) {
+    const pending = await client.query("SELECT Id FROM CertificateRequests WHERE Supercedes = $1", [
+        supercedes,
+    ]);
+    if (pending.rowCount > 0) {
+        return created;
+    }
+    const already = await client.query("SELECT Id FROM TlsCertificates WHERE Supercedes = $1", [
+        supercedes,
+    ]);
+    if (already.rowCount > 0) {
+        return created;
+    }
+    const result = await client.query(
+        `INSERT INTO CertificateRequests(Id, RequestType, CreatedTime, RequestTime, DurationHours, ${ownerColumn}, Issuer, Supercedes, Hostname) ` +
+            "VALUES(gen_random_uuid(), $1, $2, now(), $3, $4, $5, $6, $7) RETURNING Id",
+        [requestType, created, durationHours, ownerId, issuerId, supercedes, hostname || null]
+    );
+    notify.add("CertificateRequests", result.rows[0].id);
+    return new Date(created.getTime() + 1);
+}
+
+async function insertCaRotationRequest(oldCertId) {
     const client = await ClientFromPool("system");
     const notify = new NotifyTransaction();
     try {
@@ -836,15 +878,32 @@ async function insertBackboneCaRotationRequest(oldCertId) {
         const bb = await client.query("SELECT Id FROM Backbones WHERE Certificate = $1", [
             oldCertId,
         ]);
-        if (bb.rowCount != 1) {
-            throw httpError(400, "Certificate rotation of this CA is not supported");
+        let result;
+        if (bb.rowCount == 1) {
+            const durationHours = durationHoursFromInterval(BackboneExpiration());
+            result = await client.query(
+                "INSERT INTO CertificateRequests(Id, RequestType, CreatedTime, RequestTime, DurationHours, Backbone, Issuer, Supercedes) " +
+                    "VALUES(gen_random_uuid(), 'backboneCA', now(), now(), $1, $2, $3, $4) RETURNING Id",
+                [durationHours, bb.rows[0].id, cert.signedby, oldCertId]
+            );
+        } else {
+            const van = await client.query(
+                "SELECT an.Id, an.StartTime, an.EndTime, an.DeleteDelay, b.Certificate AS bbca " +
+                    "FROM ApplicationNetworks an " +
+                    "JOIN Backbones b ON b.Id = an.Backbone " +
+                    "WHERE an.Certificate = $1",
+                [oldCertId]
+            );
+            if (van.rowCount != 1) {
+                throw httpError(400, "Certificate rotation of this CA is not supported");
+            }
+            const row = van.rows[0];
+            result = await client.query(
+                "INSERT INTO CertificateRequests(Id, RequestType, CreatedTime, RequestTime, DurationHours, ApplicationNetwork, Issuer, Supercedes) " +
+                    "VALUES(gen_random_uuid(), 'vanCA', now(), now(), $1, $2, $3, $4) RETURNING Id",
+                [vanCaDurationHours(row), row.id, row.bbca, oldCertId]
+            );
         }
-        const durationHours = Math.trunc(IntervalMilliseconds(BackboneExpiration()) / 3600000);
-        const result = await client.query(
-            "INSERT INTO CertificateRequests(Id, RequestType, CreatedTime, RequestTime, DurationHours, Backbone, Issuer, Supercedes) " +
-                "VALUES(gen_random_uuid(), 'backboneCA', now(), now(), $1, $2, $3, $4) RETURNING Id",
-            [durationHours, bb.rows[0].id, cert.signedby, oldCertId]
-        );
         notify.add("CertificateRequests", result.rows[0].id);
         await client.query("COMMIT");
         await notify.commit();
@@ -870,7 +929,7 @@ async function enqueueBackboneCaChildRequests(newCaId, oldCaId) {
             return;
         }
         const backboneId = backbone.rows[0].id;
-        const durationHours = Math.trunc(IntervalMilliseconds(DefaultCertExpiration()) / 3600000);
+        const leafHours = durationHoursFromInterval(DefaultCertExpiration());
         const sites = await client.query(
             "SELECT s.Id, s.Certificate FROM InteriorSites s " +
                 "JOIN TlsCertificates c ON c.Id = s.Certificate " +
@@ -884,6 +943,19 @@ async function enqueueBackboneCaChildRequests(newCaId, oldCaId) {
                 "WHERE s.Backbone = $1 AND c.SignedBy = $2",
             [backboneId, oldCaId]
         );
+        const vans = await client.query(
+            "SELECT an.Id, an.Certificate, an.StartTime, an.EndTime, an.DeleteDelay FROM ApplicationNetworks an " +
+                "JOIN TlsCertificates c ON c.Id = an.Certificate " +
+                "WHERE an.Backbone = $1 AND c.SignedBy = $2",
+            [backboneId, oldCaId]
+        );
+        const creds = await client.query(
+            "SELECT cred.Id, cred.Certificate FROM NetworkCredentials cred " +
+                "JOIN ApplicationNetworks an ON an.Id = cred.MemberOf " +
+                "JOIN TlsCertificates c ON c.Id = cred.Certificate " +
+                "WHERE an.Backbone = $1 AND c.SignedBy = $2",
+            [backboneId, oldCaId]
+        );
         const nonManage = [];
         const manage = [];
         for (const ap of aps.rows) {
@@ -895,52 +967,110 @@ async function enqueueBackboneCaChildRequests(newCaId, oldCaId) {
         }
 
         let created = new Date();
-        const insertCr = async (requestType, ownerColumn, ownerId, supercedes, hostname) => {
-            const pending = await client.query(
-                "SELECT Id FROM CertificateRequests WHERE Supercedes = $1",
-                [supercedes]
-            );
-            if (pending.rowCount > 0) {
-                return;
-            }
-            const already = await client.query(
-                "SELECT Id FROM TlsCertificates WHERE Supercedes = $1",
-                [supercedes]
-            );
-            if (already.rowCount > 0) {
-                return;
-            }
-            const result = await client.query(
-                `INSERT INTO CertificateRequests(Id, RequestType, CreatedTime, RequestTime, DurationHours, ${ownerColumn}, Issuer, Supercedes, Hostname) ` +
-                    "VALUES(gen_random_uuid(), $1, $2, now(), $3, $4, $5, $6, $7) RETURNING Id",
-                [
-                    requestType,
-                    created,
-                    durationHours,
-                    ownerId,
-                    newCaId,
-                    supercedes,
-                    hostname || null,
-                ]
-            );
-            notify.add("CertificateRequests", result.rows[0].id);
-            created = new Date(created.getTime() + 1);
+        const insertChild = async (spec) => {
+            created = await insertRotationCertificateRequest(client, notify, created, {
+                ...spec,
+                issuerId: newCaId,
+            });
         };
 
         for (const site of sites.rows) {
-            await insertCr("interiorRouter", "InteriorSite", site.id, site.certificate);
+            await insertChild({
+                requestType: "interiorRouter",
+                ownerColumn: "InteriorSite",
+                ownerId: site.id,
+                supercedes: site.certificate,
+                durationHours: leafHours,
+            });
         }
         for (const ap of nonManage) {
-            await insertCr("accessPoint", "AccessPoint", ap.id, ap.certificate, ap.hostname);
+            await insertChild({
+                requestType: "accessPoint",
+                ownerColumn: "AccessPoint",
+                ownerId: ap.id,
+                supercedes: ap.certificate,
+                durationHours: leafHours,
+                hostname: ap.hostname,
+            });
+        }
+        for (const van of vans.rows) {
+            await insertChild({
+                requestType: "vanCA",
+                ownerColumn: "ApplicationNetwork",
+                ownerId: van.id,
+                supercedes: van.certificate,
+                durationHours: vanCaDurationHours(van),
+            });
+        }
+        for (const cred of creds.rows) {
+            await insertChild({
+                requestType: "vanCredential",
+                ownerColumn: "NetworkCredential",
+                ownerId: cred.id,
+                supercedes: cred.certificate,
+                durationHours: leafHours,
+            });
         }
         for (const ap of manage) {
-            await insertCr("accessPoint", "AccessPoint", ap.id, ap.certificate, ap.hostname);
+            await insertChild({
+                requestType: "accessPoint",
+                ownerColumn: "AccessPoint",
+                ownerId: ap.id,
+                supercedes: ap.certificate,
+                durationHours: leafHours,
+                hostname: ap.hostname,
+            });
         }
 
         await client.query("COMMIT");
         await notify.commit();
     } catch (err) {
         Log(`Rolling back enqueue-backbone-ca-children transaction: ${err.stack}`);
+        await client.query("ROLLBACK");
+    } finally {
+        client.release();
+    }
+}
+
+async function enqueueVanCaChildRequests(newCaId, oldCaId) {
+    const client = await ClientFromPool("system");
+    const notify = new NotifyTransaction();
+    try {
+        await client.query("BEGIN");
+        const van = await client.query(
+            "SELECT Id FROM ApplicationNetworks WHERE Certificate = $1",
+            [newCaId]
+        );
+        if (van.rowCount != 1) {
+            await client.query("COMMIT");
+            return;
+        }
+        const vanId = van.rows[0].id;
+        const leafHours = durationHoursFromInterval(DefaultCertExpiration());
+        // Invitation claims stay on the old vanCA; claim rotation is out of scope.
+        const members = await client.query(
+            "SELECT m.Id, m.Certificate FROM MemberSites m " +
+                "JOIN TlsCertificates c ON c.Id = m.Certificate " +
+                "WHERE m.MemberOf = $1 AND c.SignedBy = $2",
+            [vanId, oldCaId]
+        );
+
+        let created = new Date();
+        for (const member of members.rows) {
+            created = await insertRotationCertificateRequest(client, notify, created, {
+                requestType: "vanSite",
+                ownerColumn: "Site",
+                ownerId: member.id,
+                issuerId: newCaId,
+                supercedes: member.certificate,
+                durationHours: leafHours,
+            });
+        }
+
+        await client.query("COMMIT");
+        await notify.commit();
+    } catch (err) {
+        Log(`Rolling back enqueue-van-ca-children transaction: ${err.stack}`);
         await client.query("ROLLBACK");
     } finally {
         client.release();
@@ -1056,7 +1186,12 @@ async function secretAdded(dblink, secret) {
 
         if (rotation) {
             if (is_ca && oldCaId) {
-                await enqueueBackboneCaChildRequests(dblink, oldCaId);
+                if (ref_table == "Backbones") {
+                    await enqueueBackboneCaChildRequests(dblink, oldCaId);
+                } else if (ref_table == "ApplicationNetworks") {
+                    await enqueueVanCaChildRequests(dblink, oldCaId);
+                }
+                await maybeTrimIssuerSiblings(dblink);
             }
             if (!is_ca) {
                 await notifyTlsConsumers(dblink);
@@ -1175,7 +1310,7 @@ async function secretRenewed(secret) {
 
     if (caRotationId) {
         try {
-            await insertBackboneCaRotationRequest(caRotationId);
+            await insertCaRotationRequest(caRotationId);
         } catch (err) {
             if (err.statusCode === 409) {
                 Log(`CA rotation skipped for ${caRotationId}: ${err.message}`);
@@ -1430,7 +1565,7 @@ export async function RotateCertificate(cid) {
         client.release();
     }
 
-    await insertBackboneCaRotationRequest(cid);
+    await insertCaRotationRequest(cid);
     return { id: cid };
 }
 
