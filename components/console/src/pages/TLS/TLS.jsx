@@ -60,6 +60,16 @@ const isCertSuperseded = (cert, knownCerts) => {
     );
 };
 
+const sortCertsActiveFirst = (certs, knownCerts) =>
+    [...certs].sort((a, b) => {
+        const aSuperseded = isCertSuperseded(a, knownCerts);
+        const bSuperseded = isCertSuperseded(b, knownCerts);
+        if (aSuperseded !== bSuperseded) {
+            return aSuperseded ? 1 : -1;
+        }
+        return (a.label || a.id).localeCompare(b.label || b.id);
+    });
+
 const postCertAction = async (certId, action) => {
     const response = await fetch(`/api/v1alpha1/certs/${certId}/${action}`, {
         method: "POST",
@@ -161,6 +171,11 @@ const TLS = () => {
     const knownCerts = useMemo(
         () => collectKnownCerts(certificates, childCerts),
         [certificates, childCerts]
+    );
+
+    const sortedRootCerts = useMemo(
+        () => sortCertsActiveFirst(certificates, knownCerts),
+        [certificates, knownCerts]
     );
 
     const formatDate = (dateString) => {
@@ -334,7 +349,7 @@ const TLS = () => {
                     {isExpanded &&
                         !isLoadingChildren &&
                         children.length > 0 &&
-                        children.map((childCert) => (
+                        sortCertsActiveFirst(children, knownCerts).map((childCert) => (
                             <CertificateRow key={childCert.id} cert={childCert} level={level + 1} />
                         ))}
                 </React.Fragment>
@@ -428,7 +443,7 @@ const TLS = () => {
                             </TableRow>
                         </TableHead>
                         <TableBody>
-                            {certificates.map((cert) => (
+                            {sortedRootCerts.map((cert) => (
                                 <CertificateRow key={cert.id} cert={cert} level={0} />
                             ))}
                         </TableBody>
