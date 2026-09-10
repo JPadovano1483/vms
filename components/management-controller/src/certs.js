@@ -31,7 +31,6 @@ import {
     WatchCertificates,
     GetIssuers,
     kubeStatusCode,
-    httpError,
 } from "@vms/modules/kube";
 import { Log } from "@vms/modules/log";
 import { IsValidUuid } from "@vms/modules/util";
@@ -65,6 +64,12 @@ import {
 const PG_UNIQUE_VIOLATION = "23505";
 const KUBE_CONFLICT_RETRIES = 5;
 const secretWorkTail = new Map();
+
+function httpError(statusCode, message) {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    return error;
+}
 
 //
 // When new management controllers are created, add a certificate request.

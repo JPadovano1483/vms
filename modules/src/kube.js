@@ -158,12 +158,6 @@ export function kubeStatusCode(err) {
     return match ? Number(match[1]) : direct;
 }
 
-export function httpError(statusCode, message) {
-    const error = new Error(message);
-    error.statusCode = statusCode;
-    return error;
-}
-
 export function markCertificateForRenewal(cert, now = new Date()) {
     const issuing = {
         type: "Issuing",

@@ -23,7 +23,6 @@ import {
     Controlled,
     Namespace,
     kubeStatusCode,
-    httpError,
     markCertificateForRenewal,
     Start,
     TriggerCertificateRenewal,
@@ -100,15 +99,6 @@ describe("kubeStatusCode", () => {
         expect(kubeStatusCode({ response: { statusCode: 500 } })).toBe(500);
         expect(kubeStatusCode({ message: "HTTP-Code: 409 Conflict" })).toBe(409);
         expect(kubeStatusCode({ message: "no status" })).toBeUndefined();
-    });
-});
-
-describe("httpError", () => {
-    it("attaches a statusCode to an Error", () => {
-        const err = httpError(400, "bad request");
-        expect(err).toBeInstanceOf(Error);
-        expect(err.message).toBe("bad request");
-        expect(err.statusCode).toBe(400);
     });
 });
 
