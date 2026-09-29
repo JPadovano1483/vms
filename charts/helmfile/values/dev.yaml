@@ -1,0 +1,3 @@
+postgres:
+  persistence:
+    size: 1Gi

@@ -6,6 +6,18 @@ environments:
     values:
       - ./values/common.yaml
       - ../../tests/integration/kind/helmfile/values-kind.yaml
+  dev:
+    values:
+      - ./values/common.yaml
+      - ./values/dev.yaml
+  staging:
+    values:
+      - ./values/common.yaml
+      - ./values/staging.yaml
+  prod:
+    values:
+      - ./values/common.yaml
+      - ./values/prod.yaml
 ---
 {{- $deployCertManager := .Values.releases.certManager.enabled }}
 {{- $deployPostgresql := .Values.releases.postgresql.enabled }}
