@@ -4,3 +4,5 @@ postgres:
 releases:
   postgresql:
     namespace: "vms-prod"
+  managementServer:
+    namespace: "vms-prod"
