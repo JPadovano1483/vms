@@ -1,5 +1,8 @@
 {{- $ms := .Values.managementServer | default dict }}
 {{- $image := $ms.image | default dict }}
+{{- if $ms.fullnameOverride }}
+fullnameOverride: {{ $ms.fullnameOverride | quote }}
+{{- end }}
 postgres:
   host: {{ .Values.postgres.host | quote }}
   port: {{ .Values.postgres.port | quote }}

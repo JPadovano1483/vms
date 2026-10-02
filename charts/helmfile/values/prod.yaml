@@ -1,6 +1,8 @@
 postgres:
   persistence:
     size: 3Gi
+managementServer:
+  fullnameOverride: management-server-prod
 releases:
   postgresql:
     namespace: "vms-prod"

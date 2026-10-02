@@ -32,6 +32,8 @@ postgres:
   imagePullSecret: ""
 
 # configuration for the management controller image
+# fullnameOverride — optional; set per environment so ClusterRole/Binding names
+#   do not collide when multiple envs share one cluster (see values/dev.yaml etc.).
 managementServer:
   image:
     repository: quay.io/skupper/vms-management-controller

@@ -1,6 +1,8 @@
 postgres:
   persistence:
     size: 1Gi
+managementServer:
+  fullnameOverride: management-server-dev
 releases:
   postgresql:
     namespace: "vms-dev"
