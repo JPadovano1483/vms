@@ -1,3 +1,6 @@
 postgres:
   persistence:
     size: 1Gi
+releases:
+  postgresql:
+    namespace: "vms-dev"
