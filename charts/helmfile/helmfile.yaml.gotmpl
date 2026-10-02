@@ -80,7 +80,9 @@ releases:
     chart: ../management-server
     installed: {{ $deployManagementServer }}
     needs:
+      {{- if $deployCertManager }}
       - cert-manager/cert-manager
+      {{- end }}
       {{- if ne $pgNamespace "" }}
       - {{ $pgNamespace }}/postgresql
       {{- else }}
