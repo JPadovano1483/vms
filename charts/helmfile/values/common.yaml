@@ -26,10 +26,10 @@ postgres:
     appUserPasswordKey: app-user-password
     appSystemPasswordKey: app-system-password
   persistence:
-    enabled: true
+    enabled: false
     size: 5Gi
     storageClass: ""
-  imagePullSecret: ""
+  imagePullSecret: "dockerhub-creds"
 
 # configuration for the management controller image
 # fullnameOverride — optional; set per environment so ClusterRole/Binding names
