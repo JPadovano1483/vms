@@ -1,6 +1,6 @@
 postgres:
   persistence:
-    size: 1Gi
+    size: 2Gi
 managementServer:
   fullnameOverride: management-server-dev
 releases:
