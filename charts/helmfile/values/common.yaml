@@ -39,6 +39,7 @@ managementServer:
     repository: quay.io/skupper/vms-management-controller
     tag: latest
     pullPolicy: Always
+  kargoTrace: "default-0"
 
 # Release configuration:
 # certManager: installed into the cert-manager namespace (will be created if not exists)
