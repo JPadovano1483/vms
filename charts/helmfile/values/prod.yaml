@@ -3,7 +3,6 @@ postgres:
     size: 3Gi
 managementServer:
   fullnameOverride: management-server-prod
-  kargoTrace: "prod-0"
 releases:
   postgresql:
     namespace: "vms-prod"

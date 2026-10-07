@@ -3,7 +3,6 @@ postgres:
     size: 2Gi
 managementServer:
   fullnameOverride: management-server-staging
-  kargoTrace: "staging-0"
 releases:
   postgresql:
     namespace: "vms-staging"

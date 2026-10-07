@@ -3,7 +3,6 @@ postgres:
     size: 2Gi
 managementServer:
   fullnameOverride: management-server-dev-2
-  kargoTrace: "dev-0"
 releases:
   postgresql:
     namespace: "vms-dev"
