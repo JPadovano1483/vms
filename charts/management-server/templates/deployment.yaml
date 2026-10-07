@@ -13,10 +13,14 @@ spec:
       {{- include "management-server.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations .Values.kargoTrace }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-        kargo-trace: {{ .Values.managementServer.kargoTrace | quote }}
+        {{- end }}
+        {{- if .Values.kargoTrace }}
+        kargo-trace: {{ .Values.kargoTrace | quote }}
+        {{- end }}
       {{- end }}
       labels:
         {{- include "management-server.labels" . | nindent 8 }}
