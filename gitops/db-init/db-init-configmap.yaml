@@ -1,0 +1,263 @@
+apiVersion: v1
+data:
+  db-setup.sql: "/*\n * Licensed under the Apache License, Version 2.0 (the \"License\");\n
+    * you may not use this file except in compliance with the License.\n * You may
+    obtain a copy of the License at\n *\n *     http://www.apache.org/licenses/LICENSE-2.0\n
+    *\n * Unless required by applicable law or agreed to in writing, software\n *
+    distributed under the License is distributed on an \"AS IS\" BASIS,\n * WITHOUT
+    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n * See the License
+    for the specific language governing permissions and\n * limitations under the
+    License.\n */\n\n--\n-- CertificateRequestType\n--   mgmtController  Generate
+    a client certificate, signed by the rootCA, to be used by the management controller
+    to connect to backbones\n--   backboneCA      Generate a CA for an interior backbone,
+    signed by the rootCA\n--   interiorRouter  Generate a client certificate for an
+    interior router, signed by the interiorCA\n--   accessPoint     Generate a server
+    certificate for an access point, served by one or more interior routers\n--   vanCA
+    \          Generate a CA for an application network, signed by the rootCA\n--
+    \  vanCredential   Generate a client certificate for a VAN to use to connect to
+    the management backbone\n--   memberClaim     Generate a claim certificate for
+    invitees, signed by the vanCA\n--   vanSite         Generate a client certificate
+    for a joining member site, signed by the vanCA\n--\nCREATE TYPE CertificateRequestType
+    AS ENUM ('mgmtController', 'backboneCA', 'interiorRouter', 'accessPoint', 'vanCA',
+    'vanCredential', 'memberClaim', 'vanSite');\n\n--\n-- AccessPointType\n--   claim
+    \  Ingress for claim (normal) access\n--   peer    Ingress for peer backbone router
+    (inter-router) access\n--   member  Ingress for member (edge) access\n--   manage
+    \ Ingress for the management (normal) controller\n--   van     Ingress for managed
+    VANs (inter-network)\n--\nCREATE TYPE AccessPointType AS ENUM ('claim', 'peer',
+    'member', 'manage', 'van');\n\n--\n-- LifecycleType\n--\n-- Used to trace the
+    lifecycle of various objects in the DB\n--\n--   partial            The object
+    is partially specified.  There is not enough information yet to start the lifecycle.\n--
+    \  new                A new object has been created\n--   vms_cr_created     A
+    CertificateRequest has been created for the object\n--   cm_cert_created    A
+    cert-manager Certificate object has been created\n--   cm_issuer_created  A cert-manager
+    Issuer object has been created\n--   ready              The TlsCertificate is
+    generated and linked to the object\n--   active             For member or interior
+    sites, the site has successfully joined the backbone\n--   expired            The
+    object is no longer available for use\n--   failed             An unrecoverable
+    error occurred while processing this row, see the Failure column for details\n--\nCREATE
+    TYPE LifecycleType AS ENUM ('partial', 'new', 'vms_cr_created', 'cm_cert_created',
+    'cm_issuer_created', 'ready', 'active', 'expired', 'failed');\n\n--\n-- DeploymentStateType\n--\n--
+    Used to indicate what actions can be taken to deploy interior backbone sites\n--\n--
+    \  not-ready        The site is not ready to be deployed\n--   ready-bootstrap
+    \ The site is ready to begin the bootstrap process for deployment\n--   ready-bootfinish
+    The site is ready to complete the bootstrap process\n--   ready-automatic  The
+    site is ready to be deployed by the automatic process\n--   deployed         The
+    site is deployed and has checked in with the management plane\n--\nCREATE TYPE
+    DeploymentStateType AS ENUM ('not-ready', 'ready-bootstrap', 'ready-bootfinish',
+    'ready-automatic', 'colo-automatic', 'deployed');\n\n--\n-- ApplicationNetworkType\n--\n--
+    Indicates how an application network is onboarded and managed\n--\n--   tenant
+    \   The network is a tenant of a service backbone and is managed via invitations\n--
+    \  external  The network was created externally and onboarded/managed via a backbone\n--\nCREATE
+    TYPE ApplicationNetworkType AS ENUM ('tenant', 'external');\n\n--\n-- Database
+    roles for connection pooling and RLS control\n--\n-- app_user: Regular application
+    users, subject to RLS policies\n-- app_system: System/background processes, bypasses
+    RLS\n--\n\n\\getenv APP_USER_PASSWORD APP_USER_PASSWORD\n\\getenv APP_SYSTEM_PASSWORD
+    APP_SYSTEM_PASSWORD\n\nCREATE ROLE app_user LOGIN PASSWORD :'APP_USER_PASSWORD';\nCREATE
+    ROLE app_system LOGIN PASSWORD :'APP_SYSTEM_PASSWORD';\n\n-- Grant connect and
+    usage permissions\nGRANT CONNECT ON DATABASE postgres TO app_user;\nGRANT CONNECT
+    ON DATABASE postgres TO app_system;\n\n--\n-- Global configuration for VMS\n--\nCREATE
+    TABLE Configuration (\n    Id integer PRIMARY KEY CHECK (Id = 0),  -- Ensure that
+    there's only one row in this table\n    RootIssuer text,                        --
+    The name of the root-issuer for cert-manager\n    BackboneCaExpiration interval,\n
+    \   DefaultCaExpiration interval,\n    DefaultCertExpiration interval,\n    SiteControllerImage
+    text,\n    CertOrganization text\n);\n\n--\n-- Users who have access to the service
+    application\n--\nCREATE TABLE Users (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n
+    \   KeycloakSub text UNIQUE NOT NULL,\n    IsAdmin boolean DEFAULT false,\n    Email
+    text,\n    DisplayName text,\n    CreatedAt timestamptz DEFAULT CURRENT_TIMESTAMP,\n
+    \   LastSeen timestamptz DEFAULT CURRENT_TIMESTAMP\n);\n\n--\n-- Tracking of user
+    login sessions in the service application\n--\nCREATE TABLE WebSessions (\n    Id
+    UUID PRIMARY KEY,\n    UserId UUID REFERENCES Users ON DELETE CASCADE,\n    StartTime
+    timestamptz DEFAULT CURRENT_TIMESTAMP,\n    EndTime timestamptz\n);\n\n--\n--
+    x.509 certificates and certificate authorities\n--\nCREATE TABLE TlsCertificates
+    (\n    Id UUID PRIMARY KEY,\n    IsCA boolean,\n    ObjectName text,                           --
+    The name of the secret, certificate, and issuer objects in k8s\n    SignedBy UUID
+    REFERENCES TlsCertificates,  -- NULL => signed by the Root Issuer\n    Expiration
+    timestamptz,\n    RenewalTime timestamptz,\n    Generation integer DEFAULT 0,\n
+    \   Label text\n);\n\n--\n-- Target platforms for interior and member sites\n--\nCREATE
+    TABLE TargetPlatforms (\n    ShortName      text PRIMARY KEY,\n    LongName       text
+    UNIQUE,\n    SiteTemplate   text,\n    TlsTemplate    text,\n    AccessTemplate
+    text,\n    LinkTemplate   text\n);\n\n--\n-- Interior backbone networks\n--\n--
+    There can be only one backbone that is designated as the management backbone\n--\nCREATE
+    TABLE Backbones (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    Name
+    text UNIQUE,\n    Lifecycle LifecycleType DEFAULT 'new',\n    Failure text,\n
+    \   Certificate UUID REFERENCES TlsCertificates ON DELETE CASCADE,\n    CoLocatedNamespace
+    text UNIQUE DEFAULT NULL,\n    Owner UUID REFERENCES Users,\n    OwnerGroup text
+    \n);\n\n--\n-- Sites that form the interior transit backbone\n--\n-- The site's
+    certificate is used as a client-auth certificate for outgoing inter-router links.\n--
+    The access points are used as certificates/CAs for incoming connections on separate
+    ingresses.\n--\nCREATE TABLE InteriorSites (\n    Id UUID PRIMARY KEY DEFAULT
+    gen_random_uuid(),\n    Name text,\n    Lifecycle LifecycleType DEFAULT 'new',\n
+    \   Failure text,\n    Certificate UUID REFERENCES TlsCertificates ON DELETE CASCADE,\n
+    \   DeploymentState DeploymentStateType DEFAULT 'not-ready',\n    TargetPlatform
+    text REFERENCES TargetPlatforms,\n\n    Metadata text,\n\n    FirstActiveTime
+    timestamptz,\n    LastHeartbeat timestamptz,\n\n    Backbone UUID REFERENCES Backbones,\n
+    \   CoLocated boolean DEFAULT false,\n    Owner UUID REFERENCES Users,   -- TODO
+    - Remove these.  It doesn't make sense for a site to have a different owner than
+    the backbone\n    OwnerGroup text\n);\n\n--\n-- Access URL for a subset of the
+    interior routers in a backbone network.\n-- This is either simply an ingress-spec
+    for backbone listeners or it can be\n-- used to configure global-DNS configuration
+    for backbone access.\n--\nCREATE TABLE BackboneAccessPoints (\n    Id UUID PRIMARY
+    KEY DEFAULT gen_random_uuid(),\n    Name text,\n    Lifecycle LifecycleType DEFAULT
+    'partial',\n    Failure text,\n    Certificate UUID REFERENCES TlsCertificates,\n
+    \   Hostname text,\n    Port text,\n\n    Kind AccessPointType,\n    BindHost
+    text DEFAULT '',\n    InteriorSite UUID REFERENCES InteriorSites ON DELETE CASCADE,\n
+    \   GlobalAccess UUID REFERENCES BackboneAccessPoints,\n    Owner UUID REFERENCES
+    Users,\n    OwnerGroup text,\n    AccessType text\n);\n\n--\n-- Links that interconnect
+    the interior transit backbone routers\n--\nCREATE TABLE InterRouterLinks (\n    Id
+    UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    AccessPoint UUID REFERENCES BackboneAccessPoints
+    ON DELETE CASCADE,\n    ConnectingInteriorSite UUID REFERENCES InteriorSites ON
+    DELETE CASCADE,\n    Cost integer DEFAULT 1,\n    Owner UUID REFERENCES Users,\n
+    \   OwnerGroup text\n);\n\n--\n-- Instances of redundant management controllers.\n--\nCREATE
+    TABLE ManagementControllers (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n
+    \   Name text UNIQUE,\n    Lifecycle LifecycleType DEFAULT 'new',\n    Failure
+    text,\n    Certificate UUID REFERENCES TlsCertificates\n);\n\n--\n-- User-owned
+    application networks\n--\nCREATE TABLE ApplicationNetworks (\n    Id UUID PRIMARY
+    KEY DEFAULT gen_random_uuid(),\n    Name text,\n    Lifecycle LifecycleType DEFAULT
+    'new',\n    Failure text,\n    Certificate UUID REFERENCES TlsCertificates,\n\n
+    \   Backbone UUID REFERENCES Backbones (Id) ON DELETE CASCADE,\n    NetworkType
+    ApplicationNetworkType,\n    Owner UUID REFERENCES Users,\n    OwnerGroup text,\n
+    \   VanId text,\n    StartTime timestamptz DEFAULT now(),\n    EndTime timestamptz,\n
+    \   DeleteDelay interval second (0) DEFAULT '0 minutes',\n    Connected boolean,\n
+    \   LastHeartbeat timestamptz\n);\n\nCREATE TABLE NetworkCredentials (\n    Id
+    UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    Name text,\n    Lifecycle LifecycleType
+    DEFAULT 'new',\n    Failure text,\n    Certificate UUID REFERENCES TlsCertificates,\n\n
+    \   MemberOf UUID REFERENCES ApplicationNetworks ON DELETE CASCADE\n);\n\n--\n--
+    Content of an invitation-to-participate in a VAN\n--\nCREATE TABLE MemberInvitations
+    (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    Name text,\n    Lifecycle
+    LifecycleType DEFAULT 'new',\n    Failure text,\n    Certificate UUID REFERENCES
+    TlsCertificates,\n\n    ClaimAccess UUID REFERENCES BackboneAccessPoints,\n    JoinDeadline
+    timestamptz,\n    MemberClasses text ARRAY,\n    MemberOf UUID REFERENCES ApplicationNetworks
+    ON DELETE CASCADE,\n    InstanceLimit integer,                    -- NULL => no
+    limit\n    InstanceCount integer DEFAULT 0,\n    FetchCount integer DEFAULT 0,\n
+    \   InteractiveClaim boolean DEFAULT false,   -- If true, don't assert the claim
+    until the invitee intervenes\n    MemberNamePrefix text,\n    RequiredMetadata
+    text    -- A JSON map of metadata keys that must appear in the MemberSite and
+    information about where\n                             -- that metadata should
+    come from (supplied by local operator, supplied here, from environment, ...)\n);\n\n--\n--
+    Mapping of participant sites to their backbone attach point(s)\n--\nCREATE TABLE
+    EdgeLinks (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    AccessPoint
+    UUID REFERENCES BackboneAccessPoints ON DELETE CASCADE,\n    EdgeToken UUID REFERENCES
+    MemberInvitations ON DELETE CASCADE,\n    Priority integer DEFAULT 4\n);\n\n--\n--
+    Attached participant sites (accepted invitations)\n--\nCREATE TABLE MemberSites
+    (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    Name text,\n    Lifecycle
+    LifecycleType DEFAULT 'new',\n    Failure text,\n    Certificate UUID REFERENCES
+    TlsCertificates,\n\n    FirstActiveTime timestamptz,\n    LastHeartbeat timestamptz,\n\n
+    \   MemberOf UUID REFERENCES ApplicationNetworks ON DELETE CASCADE,\n    Invitation
+    UUID REFERENCES MemberInvitations ON DELETE CASCADE,\n    SiteClasses text ARRAY,\n
+    \   ActiveAccessPoint UUID REFERENCES BackboneAccessPoints,\n    TargetPlatform
+    text REFERENCES TargetPlatforms,\n    Metadata text\n);\n\n--\n-- Revoked client
+    certificates\n--\nCREATE TABLE TlsClientRevocations (\n    CertificateId UUID
+    PRIMARY KEY REFERENCES TlsCertificates, -- Certificate revoked\n    Expiration
+    timestamptz,                                    -- When this revocation can be
+    removed\n    Reason text                                                -- Reason
+    for the revocation\n);\n\n--\n-- Pending requests for certificate generation\n--\nCREATE
+    TABLE CertificateRequests (\n    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n
+    \   RequestType CertificateRequestType,\n    Issuer UUID REFERENCES TlsCertificates
+    (Id) ON DELETE CASCADE,  -- NULL for the root CA issuer\n    Lifecycle LifecycleType
+    DEFAULT 'new',\n    Failure text,\n\n    --\n    -- Optional hostname for the
+    certificate\n    --\n    Hostname text,\n\n    --\n    -- The time when this request
+    row was created.  This should be used to determine the order of processing\n    --
+    when there are multiple actionable requests in the table.  First-created, first-processed.\n
+    \   --\n    CreatedTime timestamptz,\n\n    --\n    -- If present, this is the
+    time after which the request should be processed.  If the request time is in\n
+    \   -- the future, this request is not at present eligible to be processed.\n
+    \   --\n    RequestTime timestamptz,\n\n    --\n    -- If present, this is the
+    duration of the generated certificate.  If not present, a default\n    -- (relatively
+    long) expiration interval will be used.\n    --\n    DurationHours integer,\n\n
+    \   --\n    -- Link to the requesting\n    --\n    ManagementController UUID REFERENCES
+    ManagementControllers (Id) ON DELETE CASCADE,\n    Backbone UUID REFERENCES Backbones
+    (Id) ON DELETE CASCADE,\n    InteriorSite UUID REFERENCES InteriorSites (Id) ON
+    DELETE CASCADE,\n    AccessPoint UUID REFERENCES BackboneAccessPoints (Id) ON
+    DELETE CASCADE,\n    ApplicationNetwork UUID REFERENCES ApplicationNetworks (Id)
+    ON DELETE CASCADE,\n    NetworkCredential UUID REFERENCES NetworkCredentials (Id)
+    ON DELETE CASCADE,\n    Invitation UUID REFERENCES MemberInvitations (Id) ON DELETE
+    CASCADE,\n    Site UUID REFERENCES MemberSites (Id) ON DELETE CASCADE\n);\n\n--\n--
+    Pre-populate the database with some test data.\n--\nINSERT INTO Configuration
+    (Id, RootIssuer, DefaultCaExpiration, DefaultCertExpiration, BackboneCaExpiration,
+    SiteControllerImage, CertOrganization)\n    VALUES (0, 'vms-root', '30 days',
+    '1 week', '1 year', 'quay.io/skupper/vms-site-controller:latest', 'enterprise.com');\n\nINSERT
+    INTO TargetPlatforms (ShortName, LongName) VALUES\n    ('sk2',      'Kubernetes/OpenShift'),\n
+    \   ('podman',   'Podman'),\n    ('docker',   'Docker'),\n    ('linux',    'Linux'),\n
+    \   ('m-server', 'Co-located with the management server');\n\n-- Function to check
+    if the current user is an admin\nCREATE OR REPLACE FUNCTION is_admin()\nRETURNS
+    boolean AS $$\nBEGIN\n    RETURN current_setting('session.is_admin', true)::boolean;\nEND;\n$$
+    LANGUAGE plpgsql STABLE;\n\n-- RLS policies\nCREATE POLICY user_access_backbones_policy\nON
+    Backbones\nFOR ALL\nUSING (\n    Owner = NULLIF(current_setting('session.user_id',
+    true), '')::uuid \n    OR \n    is_admin()\n);\n\nCREATE POLICY group_access_backbones_policy\nON
+    Backbones\nFOR ALL\nUSING (\n    OwnerGroup = 'public'\n    OR\n    OwnerGroup
+    = ANY(current_setting('session.user_groups', true)::text[])\n);\n\nCREATE POLICY
+    user_access_application_networks_policy\nON ApplicationNetworks\nFOR ALL\nUSING
+    (\n    Owner = NULLIF(current_setting('session.user_id', true), '')::uuid \n    OR
+    \n    is_admin()\n);\n\nCREATE POLICY group_access_application_networks_policy\nON
+    ApplicationNetworks\nFOR ALL\nUSING (\n    OwnerGroup = 'public'\n    OR\n    OwnerGroup
+    = ANY(current_setting('session.user_groups', true)::text[])\n);\n\nCREATE POLICY
+    user_access_backbone_access_points_policy\nON BackboneAccessPoints\nFOR ALL\nUSING
+    (\n    Owner = NULLIF(current_setting('session.user_id', true), '')::uuid \n    OR
+    \n    is_admin()\n);\n\nCREATE POLICY group_access_backbone_access_points_policy\nON
+    BackboneAccessPoints\nFOR ALL\nUSING (\n    OwnerGroup = 'public'\n    OR\n    OwnerGroup
+    = ANY(current_setting('session.user_groups', true)::text[])\n);\n\nCREATE POLICY
+    user_access_interior_sites_policy\nON InteriorSites\nFOR ALL\nUSING (\n    Owner
+    = NULLIF(current_setting('session.user_id', true), '')::uuid \n    OR \n    is_admin()\n);\n\nCREATE
+    POLICY group_access_interior_sites_policy\nON InteriorSites\nFOR ALL\nUSING (\n
+    \   OwnerGroup = 'public'\n    OR\n    OwnerGroup = ANY(current_setting('session.user_groups',
+    true)::text[])\n);\n\nCREATE POLICY user_access_inter_router_links_policy\nON
+    InterRouterLinks\nFOR ALL\nUSING (\n    Owner = NULLIF(current_setting('session.user_id',
+    true), '')::uuid \n    OR \n    is_admin()\n);\n\nCREATE POLICY group_access_inter_router_links_policy\nON
+    InterRouterLinks\nFOR ALL\nUSING (\n    OwnerGroup = 'public'\n    OR\n    OwnerGroup
+    = ANY(current_setting('session.user_groups', true)::text[])\n);\n\nALTER TABLE
+    Backbones ENABLE ROW LEVEL SECURITY;\nALTER TABLE ApplicationNetworks ENABLE ROW
+    LEVEL SECURITY;\nALTER TABLE BackboneAccessPoints ENABLE ROW LEVEL SECURITY;\nALTER
+    TABLE InteriorSites ENABLE ROW LEVEL SECURITY;\nALTER TABLE InterRouterLinks ENABLE
+    ROW LEVEL SECURITY;\n\n-- Grant permissions to roles\n-- app_user gets standard
+    permissions (subject to RLS)\nGRANT USAGE ON SCHEMA public TO app_user;\nGRANT
+    SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;\nGRANT
+    USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;\nALTER DEFAULT PRIVILEGES
+    IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;\nALTER
+    DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_user;\n\n--
+    app_system bypass RLS (they have BYPASSRLS attribute)\nALTER ROLE app_system BYPASSRLS;\n\nGRANT
+    USAGE ON SCHEMA public TO app_system;\nGRANT SELECT, INSERT, UPDATE, DELETE ON
+    ALL TABLES IN SCHEMA public TO app_system;\nGRANT USAGE, SELECT ON ALL SEQUENCES
+    IN SCHEMA public TO app_system;\nALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT
+    SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_system;\nALTER DEFAULT PRIVILEGES
+    IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_system;\n\n-- index owner
+    and ownergroup columns for better performance\nCREATE INDEX idx_backbones_owner
+    ON Backbones (Owner);\nCREATE INDEX idx_backbones_ownergroup ON Backbones (OwnerGroup);\nCREATE
+    INDEX idx_application_networks_owner ON ApplicationNetworks (Owner);\nCREATE INDEX
+    idx_application_networks_ownergroup ON ApplicationNetworks (OwnerGroup);\nCREATE
+    INDEX idx_backbone_access_points_owner ON BackboneAccessPoints (Owner);\nCREATE
+    INDEX idx_backbone_access_points_ownergroup ON BackboneAccessPoints (OwnerGroup);\nCREATE
+    INDEX idx_interior_sites_owner ON InteriorSites (Owner);\nCREATE INDEX idx_interior_sites_ownergroup
+    ON InteriorSites (OwnerGroup);\nCREATE INDEX idx_inter_router_links_owner ON InterRouterLinks
+    (Owner);\nCREATE INDEX idx_inter_router_links_ownergroup ON InterRouterLinks (OwnerGroup);\n\n/*\nNotes:\n\n
+    \ - (DONE) Consider a \"service-link\" type that represents a service-specific
+    relationship between a specified set of processes or [in,e]gresses.\n      o Ties
+    \"required\" services to \"provided\" services\n      o Owns the VAN address for
+    the service-link, including scope-specific sub-addresses\n      o Specifies the
+    distribution of payload: anycast, multicast\n\n  - Use ServiceLink to manage advanced
+    routing (A/B, Blue/Green, incremental image upgrade, tee/tap, etc.)\n\n  - Associate
+    API-Management to ingresses and egresses (auth, accounting, etc.).\n\n  - (DONE)
+    Consider generalizing \"offers\" and \"requires\" as roles on a ServiceLink.  This
+    allows the addition of more roles.\n    Such roles should probably be renamed
+    \"connects\" and \"accepts\".\n\n  - Take into account the fact that there may
+    be multiple routers in an interior site.  OR define that there can only be one
+    router per backbone site.\n\n  - Keep in mind that an entire application network
+    should be deployable via gitops.  This means that an already-created\n    application
+    network should be able to be populated with components and service-links via gitops.\n\n
+    \ - Components should be allocatable to multiple classes/sites.\n\n  - Allow for
+    partially configured ingress/egress components, where the participant can supply
+    the\n    missing data locally.\n\n  - (DONE) Consider allowing for multiple, disjoint
+    backbone networks.\n\n  - Add a pre-start buffer time to the lifecycle of ApplicationNetworks
+    (default 5-minutes) so that\n    invitations can be activated before the exact
+    start time.\n\n  - Problem:  Figure out how to issue invitations well prior to
+    the start time of ApplicationNetworks.\n    Perhaps use the backbone CA to sign
+    claims.\n       o Generate van CAs immediately to sign invitations but don't install
+    the van CAs until the pre-start time.\n\n  - Add state to the invitation that
+    controls whether the participant may or may not create their own interfaces in
+    the\n    application network.  If not permitted, the participant is limited to
+    only using the allocated interfaces.\n\n  - (DONE) Consider issuing a certificate
+    per backbone-access point that contains the hostname of the access point.\n\n*/\n"
+kind: ConfigMap
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  name: db-init-configmap
