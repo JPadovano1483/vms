@@ -1,0 +1,10 @@
+postgres:
+  persistence:
+    size: 2Gi
+managementServer:
+  fullnameOverride: management-server-vault
+releases:
+  postgresql:
+    namespace: "vms-vault"
+  managementServer:
+    namespace: "vms-vault"

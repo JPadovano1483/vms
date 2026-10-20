@@ -18,6 +18,10 @@ environments:
     values:
       - ./values/common.yaml
       - ./values/prod.yaml
+  vault:
+    values:
+      - ./values/common.yaml
+      - ./values/vault.yaml
 ---
 {{- $deployCertManager := .Values.releases.certManager.enabled }}
 {{- $deployPostgresql := .Values.releases.postgresql.enabled }}
