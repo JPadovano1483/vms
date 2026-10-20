@@ -1,0 +1,23 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: keycloak-config
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: ClusterSecretStore
+  target:
+    name: keycloak-config
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        keycloak.json: "{{ .keycloak }}"
+  data:
+    - secretKey: keycloak
+      remoteRef:
+        key: secret/data/keycloak-config
+        property: keycloak.json
